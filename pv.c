@@ -1,42 +1,56 @@
 #if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#define IS_WINDOWS 1
+#else
+#define IS_WINDOWS 0
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
-
-ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
-    size_t pos = 0;
-    int c;
-
-    if (*lineptr == NULL || *n == 0) {
-        *n = 128;
-        *lineptr = malloc(*n);
-        if (*lineptr == NULL) return -1;
-    }
-
-    while ((c = fgetc(stream)) != EOF) {
-        if (pos + 1 >= *n) {
-            *n *= 2;
-            char *new_ptr = realloc(*lineptr, *n);
-            if (!new_ptr) return -1;
-            *lineptr = new_ptr;
-        }
-        (*lineptr)[pos++] = c;
-        if (c == '\n') break;
-    }
-
-    if (pos == 0 && c == EOF) return -1;
-    (*lineptr)[pos] = '\0';
-    return pos;
-}
-#endif
-// #include <stdio.h>
-// #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
 #include <time.h>
-#include <getopt.h>
 
-#define VERSION "1.1"
+#if IS_WINDOWS
+#include <io.h>
+#define isatty _isatty
+#define STDIN_FILENO 0
+#define usleep(x) Sleep((x)/1000)
+#else
+#include <unistd.h>
+#include <getopt.h>
+#endif
+
+#define VERSION "1.3"
 #define DEFAULT_RATE_LIMIT 0  // 0 means no limit
+
+// Windows-specific getline implementation
+#if IS_WINDOWS
+ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+  size_t pos = 0;
+  int c;
+  
+  if (*lineptr == NULL || *n == 0) {
+    *n = 128;
+    *lineptr = malloc(*n);
+    if (*lineptr == NULL) return -1;
+  }
+
+  while ((c = fgetc(stream)) != EOF) {
+    if (pos + 1 >= *n) {
+      *n *= 2;
+      char *new_ptr = realloc(*lineptr, *n);
+      if (!new_ptr) return -1;
+      *lineptr = new_ptr;
+    }
+    (*lineptr)[pos++] = c;
+    if (c == '\n') break;
+  }
+
+  if (pos == 0 && c == EOF) return -1;
+  (*lineptr)[pos] = '\0';
+  return pos;
+}
+#endif
 
 // Function declarations
 void print_usage(const char *progname);
@@ -56,7 +70,7 @@ void print_usage(const char *progname) {
   fprintf(stderr, "Usage: %s [-q] [-L RATE] [FILE]...\n", progname);
   fprintf(stderr, "Line-by-line pipe viewer with rate limiting\n\n");
   fprintf(stderr, "Options:\n");
-  fprintf(stderr, "  -q         Quiet mode, no statistics\n");
+  fprintf(stderr, "  -q         Quiet mode (no statistics)\n");
   fprintf(stderr, "  -L RATE    Limit transfer to RATE bytes per second\n");
   fprintf(stderr, "  --help     Display this help and exit\n");
   fprintf(stderr, "  --version  Output version information and exit\n");
@@ -68,9 +82,11 @@ void print_version(void) {
 
 void print_stats(void) {
   if (config.quiet) return;
+  
   time_t now = time(NULL);
   double elapsed = difftime(now, config.start_time);
   double rate = elapsed > 0 ? config.total_bytes / elapsed : 0;
+  
   fprintf(stderr, "\r%zu bytes (%6.1f KB/s)", config.total_bytes, rate / 1024);
   fflush(stderr);
 }
@@ -78,31 +94,29 @@ void print_stats(void) {
 void process_line(const char *line) {
   size_t len = strlen(line);
   config.total_bytes += len;
-
+  
   // Apply rate limiting
   if (config.rate_limit > 0) {
     static size_t bytes_this_second = 0;
     static time_t current_second = 0;
-
+    
     time_t now = time(NULL);
     if (now != current_second) {
       current_second = now;
       bytes_this_second = 0;
     }
-
+    
     bytes_this_second += len;
     if (bytes_this_second > config.rate_limit) {
-      // Calculate how much we're over the limit
       double over = bytes_this_second - config.rate_limit;
-      // Sleep for the appropriate time (in microseconds)
       usleep(over * 1000000 / config.rate_limit);
     }
   }
-
+  
   // Output the line immediately
   fputs(line, stdout);
   fflush(stdout);
-
+  
   // Update stats
   if (!config.quiet) {
     print_stats();
@@ -131,6 +145,8 @@ int main(int argc, char *argv[]) {
   config.total_bytes = 0;
 
   // Parse command line options
+  int opt;
+#if !IS_WINDOWS
   static struct option long_options[] = {
     {"quiet", no_argument, 0, 'q'},
     {"rate-limit", required_argument, 0, 'L'},
@@ -138,13 +154,16 @@ int main(int argc, char *argv[]) {
     {"version", no_argument, 0, 'v'},
     {0, 0, 0, 0}
   };
-
-  int opt;
+  
   while ((opt = getopt_long(argc, argv, "qL:hv", long_options, NULL)) != -1) {
+#else
+  // Simple Windows argument parsing
+  while ((opt = getopt(argc, argv, "qL:hv")) != -1) {
+#endif
     switch (opt) {
       case 'q':
         config.quiet = 1;
-          break;
+        break;
       case 'L':
         config.rate_limit = atol(optarg);
         break;
@@ -173,7 +192,7 @@ int main(int argc, char *argv[]) {
     }
   } else {
     if (isatty(STDIN_FILENO) && !config.quiet) {
-      fprintf(stderr, "Waiting for line input... (use pipe or specify files)\n");
+      fprintf(stderr, "Waiting for input (use pipe or specify files)...\n");
     }
     process_input(stdin);
   }
